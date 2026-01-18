@@ -1,0 +1,33 @@
+name: Deploy BlueprintAI on Laptop Server
+
+on:
+  push:
+    branches: ["main"]
+
+jobs:
+  deploy:
+    name: Build & Deploy using Docker Compose
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Show system info
+        run: |
+          node -v
+          npm -v
+          docker -v
+          docker compose version
+
+      - name: Create .env for deployment
+        run: |
+          echo OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} > .env
+
+      - name: Build & Run containers
+        run: |
+          docker compose down
+          docker compose up --build -d
+
+      - name: Show running containers
+        run: docker ps
