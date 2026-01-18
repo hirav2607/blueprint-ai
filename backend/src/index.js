@@ -6,7 +6,7 @@ const { ApolloServer } = require("@apollo/server");
 const { expressMiddleware } = require("@as-integrations/express5");
 
 const connectDB = require("./config/db");
-const typeDefs = require("./graphql/typeDefs");
+const typeDefs = require("./graphql/schema");
 const resolvers = require("./graphql/resolvers");
 
 dotenv.config();
@@ -17,6 +17,8 @@ async function startServer() {
 
   app.use(cors());
   app.use(express.json());
+  
+  console.log("✅ Using schema file:", require.resolve("./graphql/schema"));
 
   const server = new ApolloServer({
     typeDefs,

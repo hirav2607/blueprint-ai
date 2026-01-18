@@ -1,86 +1,72 @@
 const Diagram = require("../models/Diagram");
-const { generateD2Code } = require("../services/openaiService");
 const { generateSVGFromD2 } = require("../services/d2Runner");
+const { sanitizeD2 } = require("../services/d2Sanitizer");
+const { generateD2FromPrompt } = require("../services/openaiService");
+
+const fallbackD2 = (description) => `
+layout: dagre
+direction: right
+
+# Fallback diagram (AI output invalid)
+user: "User Prompt" { shape: rectangle }
+openai: "OpenAI (D2 Generator)" { shape: hexagon }
+d2: "D2 Renderer" { shape: rectangle }
+svg: "SVG Output" { shape: rectangle }
+
+user -> openai: "${description.slice(0, 40)}..."
+openai -> d2: "D2 code"
+d2 -> svg: "SVG"
+`.trim();
 
 const resolvers = {
   Query: {
-    getDiagrams: async () => {
-      return await Diagram.find().sort({ createdAt: -1 });
-    },
-
-    getDiagram: async (_, { id }) => {
-      return await Diagram.findById(id);
-    },
+    diagrams: async () => Diagram.find().sort({ createdAt: -1 }).limit(50),
+    diagram: async (_, { id }) => Diagram.findById(id),
   },
 
+
   Mutation: {
-    createDiagram: async (_, { title, description }) => {
-      const diagram = new Diagram({ title, description });
-      return await diagram.save();
-    },
+    generateDiagram: async (_, { description, options }) => {
+      let finalD2 = "";
+      let finalSVG = "";
+      let lastError = "";
 
-    updateDiagram: async (_, { id, title, description, d2Code, svg }) => {
-      return await Diagram.findByIdAndUpdate(
-        id,
-        { title, description, d2Code, svg },
-        { new: true }
-      );
-    },
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const raw = await generateD2FromPrompt(description, options || {}, attempt, lastError);
+          const sanitized = sanitizeD2(raw);
 
-    deleteDiagram: async (_, { id }) => {
-      await Diagram.findByIdAndDelete(id);
-      return "✅ Diagram deleted successfully";
-    },
+          finalD2 = sanitized;
+          finalSVG = generateSVGFromD2(finalD2);
 
-    /**
-     * ✅ Core feature:
-     * description -> OpenAI -> D2 code -> D2 docker -> SVG -> Mongo -> return
-     *
-     * Includes fallback retry: if D2 compile fails, retry with "minimal safe D2"
-     */
-    generateDiagram: async (_, { description }) => {
-      if (!description || !description.trim()) {
-        throw new Error("Description is required");
+          break;
+        } catch (err) {
+          lastError = err.message || String(err);
+          console.error(`❌ Attempt ${attempt} failed:`, lastError);
+        }
       }
 
-      // 1) OpenAI generates D2
-      let d2Code = await generateD2Code(description.trim());
-
-      // 2) Convert to SVG (with fallback)
-      let svg = "";
-      try {
-        svg = generateSVGFromD2(d2Code);
-      } catch (e) {
-        console.error("\n⚠️ First D2 render failed. Retrying with safe mode...");
-        console.error("Reason:", e.message);
-
-        // Fallback prompt: minimal safe D2 (no heavy style/classes)
-        const safeModePrompt = `
-Generate VALID D2 code ONLY. It MUST compile.
-Use only safe simple syntax:
-- layout: elk
-- direction: right
-- simple node labels
-- arrows A -> B
-- groups with braces
-DO NOT use: classes, vars, icons, fancy styling, or custom features.
-Description:
-${description.trim()}
-`;
-
-        d2Code = await generateD2Code(safeModePrompt);
-        svg = generateSVGFromD2(d2Code);
+      if (!finalSVG) {
+        finalD2 = fallbackD2(description);
+        finalSVG = generateSVGFromD2(finalD2);
       }
 
-      // 3) Save result
-      const diagram = new Diagram({
+      const doc = await Diagram.create({
         title: "Generated Diagram",
         description,
-        d2Code,
-        svg,
+        d2Code: finalD2,
+        svg: finalSVG,
+
+        // ✅ store options
+        diagramType: options?.diagramType || "architecture",
+        direction: options?.direction || "right",
+        detailLevel: options?.detailLevel || "detailed",
+        withIcons: options?.withIcons ?? true,
+        withContainers: options?.withContainers ?? true,
+        layout: options?.layout || "dagre",
       });
 
-      return await diagram.save();
+      return doc;
     },
   },
 };

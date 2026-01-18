@@ -1,153 +1,75 @@
-require("dotenv").config();
 const OpenAI = require("openai");
-const d2SystemPrompt = require("../prompts/d2SystemPrompt"); 
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
 });
 
-/**
- * Remove markdown fences, "D2 code:" labels, etc.
- */
-function cleanupLLMText(text) {
-  if (!text) return "";
+function buildSystemPrompt(options = {}) {
+  const {
+    diagramType = "architecture",
+    direction = "right",
+    detailLevel = "detailed",
+    withIcons = true,
+    withContainers = true,
+    layout = "dagre",
+  } = options;
 
-  let out = text.trim();
+  return `
+You are an expert D2 (d2lang) diagram generator.
 
-  // remove markdown fences
-  out = out.replace(/^```(\w+)?/gm, "").replace(/```$/gm, "").trim();
+STRICT RULES:
+1) Output ONLY valid D2 code. No explanations. No markdown. No backticks.
+2) Never ask clarifying questions. Always generate a diagram.
+3) It MUST compile with: d2 input.d2 output.svg
+4) Use correct D2 styles:
+   - style.fill, style.stroke, style.font-size, style.border-radius, style.stroke-width
+5) Use these settings:
+   - diagramType: ${diagramType}
+   - direction: ${direction}
+   - layout: ${layout}
+   - detailLevel: ${detailLevel}
+   - withIcons: ${withIcons}
+   - withContainers: ${withContainers}
 
-  // remove common labels
-  out = out.replace(/^D2\s*code\s*:/i, "").trim();
-  out = out.replace(/^Output\s*:/i, "").trim();
+TYPE RULES:
+- architecture: components + connections
+- flowchart: steps + decisions (diamond)
+- sequence: lifelines + messages (use containers/swimlanes if helpful)
+- erd: entities with attributes; relationships with labels
+- network: zones/subnets/firewall/dmz/internal + connections
+- mindmap: central topic with branches
 
-  return out;
+OUTPUT FORMAT:
+- start with "layout: ${layout}"
+- include "direction: ${direction}"
+
+Return ONLY D2 code.
+`.trim();
 }
 
-/**
- * Convert invalid style keys to valid style.* keys
- * Example: fill: "#fff" -> style.fill: "#fff"
- */
-function sanitizeD2Styles(d2) {
-  if (!d2) return "";
+async function generateD2FromPrompt(userPrompt, options = {}, attempt = 1, lastError = "") {
+  const SYSTEM_PROMPT = buildSystemPrompt(options);
 
-  return d2
-    .replace(/^\s*fill\s*:/gm, "  style.fill:")
-    .replace(/^\s*stroke\s*:/gm, "  style.stroke:")
-    .replace(/^\s*font-size\s*:/gm, "  style.font-size:")
-    .replace(/^\s*border-radius\s*:/gm, "  style.border-radius:")
-    .replace(/^\s*opacity\s*:/gm, "  style.opacity:");
-}
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    {
+      role: "user",
+      content: `
+User description:
+${userPrompt}
 
-/**
- * Fix common D2 syntax mistakes:
- * - unquoted hex colors
- * - trailing commas
- * - double style.style.
- */
-function sanitizeD2Syntax(d2) {
-  if (!d2) return "";
-
-  let out = d2;
-
-  // Fix unquoted hex colors: style.fill: #E0F2FE -> style.fill: "#E0F2FE"
-  out = out.replace(
-    /(style\.(fill|stroke)\s*:\s*)(#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}))/g,
-    '$1"$3"'
-  );
-
-  // remove trailing commas after values
-  out = out.replace(/(style\.(fill|stroke)\s*:\s*".+?"),/g, "$1");
-  out = out.replace(/(style\.(font-size|border-radius)\s*:\s*\d+),/g, "$1");
-
-  // accidental "style.style.fill"
-  out = out.replace(/style\.style\./g, "style.");
-
-  return out.trim();
-}
-
-/**
- * Quick heuristic: does response look like D2 code?
- */
-function looksLikeD2(d2) {
-  if (!d2) return false;
-
-  // D2 usually has at least one of these patterns
-  const patterns = [
-    "->",
-    "{",
-    "layout:",
-    "direction:",
-    "shape:",
-    "style.",
-    "classes:",
+${lastError ? `Previous D2 compile error:\n${lastError}\n\nFix and regenerate valid D2.` : ""}
+`.trim(),
+    },
   ];
 
-  return patterns.some((p) => d2.includes(p));
-}
-
-/**
- * Ask OpenAI to generate D2 code.
- * Includes:
- * - cleanup
- * - sanitization
- * - retry if output doesn't look like D2
- */
-async function generateD2Code(userDescription) {
-  if (!userDescription || !userDescription.trim()) {
-    throw new Error("Description is required to generate diagram.");
-  }
-
-  // 1) primary call
-  const response = await client.chat.completions.create({
+  const res = await client.chat.completions.create({
     model: "gpt-4o-mini",
-    messages: [
-      { role: "system", content: d2SystemPrompt },
-      { role: "user", content: userDescription.trim() },
-    ],
     temperature: 0.2,
-    max_tokens: 900,
+    messages,
   });
 
-  let d2 = cleanupLLMText(response?.choices?.[0]?.message?.content || "");
-  d2 = sanitizeD2Styles(d2);
-  d2 = sanitizeD2Syntax(d2);
-
-  // 2) Retry if output isn't D2
-  if (!looksLikeD2(d2)) {
-    const retry = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            d2SystemPrompt +
-            "\n\nIMPORTANT:\n- OUTPUT ONLY D2 CODE.\n- DO NOT ask questions.\n- DO NOT output explanations.\n- Must compile.\n",
-        },
-        {
-          role: "user",
-          content:
-            "Convert this description into D2 code ONLY:\n\n" +
-            userDescription.trim(),
-        },
-      ],
-      temperature: 0.1,
-      max_tokens: 900,
-    });
-
-    d2 = cleanupLLMText(retry?.choices?.[0]?.message?.content || "");
-    d2 = sanitizeD2Styles(d2);
-    d2 = sanitizeD2Syntax(d2);
-  }
-
-  // 3) final guard
-  if (!looksLikeD2(d2)) {
-    throw new Error(
-      "LLM did not return D2 code. Try prompt starting with: 'Architecture diagram:' or 'Flowchart:'"
-    );
-  }
-
-  return d2.trim();
+  return (res.choices?.[0]?.message?.content || "").trim();
 }
 
-module.exports = { generateD2Code };
+module.exports = { generateD2FromPrompt };
