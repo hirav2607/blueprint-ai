@@ -20,11 +20,13 @@ jobs:
           docker -v
           docker compose version
 
-      - name: Create .env for deployment
+      - name: Create .env for deployment (UTF-8 no BOM)
+        shell: pwsh
         run: |
-          echo OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} > .env
+          $content = "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
+          [System.IO.File]::WriteAllText(".env", $content, [System.Text.UTF8Encoding]::new($false))
 
-      - name: Build & Run containers
+      - name: Deploy
         run: |
           docker compose down
           docker compose up --build -d
