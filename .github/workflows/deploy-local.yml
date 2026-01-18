@@ -20,11 +20,17 @@ jobs:
           docker -v
           docker compose version
 
+      - name: Remove old .env
+        shell: powershell
+        run: |
+          if (Test-Path ".env") { Remove-Item ".env" -Force }
+
       - name: Create .env for deployment (UTF-8 no BOM)
-        shell: pwsh
+        shell: powershell
         run: |
           $content = "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
-          [System.IO.File]::WriteAllText(".env", $content, [System.Text.UTF8Encoding]::new($false))
+          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText(".env", $content, $utf8NoBom)
 
       - name: Deploy
         run: |
